@@ -3,8 +3,10 @@
 
 use defmt::*;
 use embassy_executor::Spawner;
-use embassy_stm32::gpio::{Level, Output, Speed};
+use embassy_stm32::gpio::{Level, Output, OutputType, Speed};
 use embassy_stm32::i2c::{self, I2c};
+use embassy_stm32::time::hz;
+use embassy_stm32::timer::simple_pwm::{PwmPin, SimplePwm};
 use embassy_time::{Duration, Timer};
 use mpu6050::*;
 use {defmt_rtt as _, panic_probe as _};
@@ -42,6 +44,31 @@ async fn main(_spawner: Spawner) {
         i2c_config,
     );
 
+    // Initialize PWM on PA0 (TIM2_CH1) at 50Hz for ESC/servo control
+    let ch1_pin = PwmPin::new(p.PA0, OutputType::PushPull);
+    let mut pwm = SimplePwm::new(
+        p.TIM2,
+        Some(ch1_pin),
+        None,
+        None,
+        None,
+        hz(50),
+        Default::default(),
+    );
+    let max_duty = pwm.ch1().max_duty_cycle();
+    pwm.ch1().enable();
+
+    // ESC expects 1000-2000µs pulses within a 20ms period (50Hz)
+    // duty = pulse_us / 20000 * max_duty
+    let min_throttle = max_duty as u32 * 1000 / 20000; // 1000µs = arm/idle
+    let max_throttle = max_duty as u32 * 2000 / 20000; // 2000µs = full throttle
+
+    // Arm ESC: hold minimum throttle for 3 seconds
+    info!("Arming ESC (hold min throttle for 3s)...");
+    pwm.ch1().set_duty_cycle(min_throttle as u16);
+    Timer::after(Duration::from_secs(3)).await;
+    info!("ESC armed! max_duty: {}, min_throttle: {}, max_throttle: {}", max_duty, min_throttle, max_throttle);
+
     info!("I2C initialized, connecting to MPU6050...");
 
     // Initialize MPU6050 (default address 0x68)
@@ -76,6 +103,11 @@ async fn main(_spawner: Spawner) {
     }
 
     info!("Starting main loop...");
+
+    // Example: 25% throttle
+    let throttle = min_throttle + (max_throttle - min_throttle) * 25 / 100;
+    pwm.ch1().set_duty_cycle(throttle as u16);
+
 
     // Main loop - read sensor data
     loop {
