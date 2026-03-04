@@ -1,5 +1,4 @@
 use defmt::*;
-use embassy_executor;
 use embassy_stm32::i2c::{I2c, mode::Master};
 use embassy_stm32::gpio::Output;
 use embassy_stm32::mode::Async;

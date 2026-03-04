@@ -3,28 +3,34 @@
 
 use defmt::*;
 use embassy_executor::Spawner;
-use embassy_stm32::gpio::{Level, Output, OutputType, Speed};
+use embassy_stm32::exti::ExtiInput;
+use embassy_stm32::gpio::{Level, Output, OutputType, Pull, Speed};
 use embassy_stm32::i2c::{self, I2c};
 use embassy_stm32::time::hz;
 use embassy_stm32::timer::simple_pwm::{PwmPin, SimplePwm};
+use embassy_stm32::peripherals;
+use embassy_time::Instant;
 use {defmt_rtt as _, panic_probe as _};
 
 mod mpu;
 mod pwm;
+mod receiver;
+// mod state_estimator;
 
-use crate::pwm::pwm_task;
 use crate::mpu::mpu_task;
+use crate::pwm::pwm_task;
+use crate::receiver::pwm_receiver_channel;
 
 // Bind interrupt handlers
 embassy_stm32::bind_interrupts!(struct Irqs {
-    I2C1_EV => embassy_stm32::i2c::EventInterruptHandler<embassy_stm32::peripherals::I2C1>;
-    I2C1_ER => embassy_stm32::i2c::ErrorInterruptHandler<embassy_stm32::peripherals::I2C1>;
+    I2C1_EV => embassy_stm32::i2c::EventInterruptHandler<peripherals::I2C1>;
+    I2C1_ER => embassy_stm32::i2c::ErrorInterruptHandler<peripherals::I2C1>;
 });
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    info!("Starting MPU6050 reader!");
-    
+    info!("Starting STM32");
+
     // Initialize STM32 peripherals
     let p = embassy_stm32::init(Default::default());
 
@@ -32,12 +38,12 @@ async fn main(spawner: Spawner) {
     let led = Output::new(p.PC13, Level::High, Speed::Low);
 
     info!("Initializing I2C...");
-    
+
     // Initialize I2C1 (SCL=PB6, SDA=PB7)
     let mut i2c_config = i2c::Config::default();
     i2c_config.scl_pullup = true;
     i2c_config.sda_pullup = true;
-    
+
     let i2c = I2c::new(
         p.I2C1,
         p.PB6, // SCL
@@ -47,6 +53,8 @@ async fn main(spawner: Spawner) {
         p.DMA1_CH0,
         i2c_config,
     );
+
+    info!("I2C initialized");
 
     // Initialize PWM on TIM2 CH1-CH4 at 50Hz for ESC/servo control
     // CH1=PA0, CH2=PA1, CH3=PA2, CH4=PA3
@@ -64,9 +72,26 @@ async fn main(spawner: Spawner) {
         Default::default(),
     );
 
-    info!("I2C initialized");
+    info!("PWM initialized");
+
+    let ch1 = ExtiInput::new(p.PA4, p.EXTI4, Pull::None);
+    let ch2 = ExtiInput::new(p.PA5, p.EXTI5, Pull::None);
+    let ch3 = ExtiInput::new(p.PA6, p.EXTI6, Pull::None);
+    let ch4 = ExtiInput::new(p.PA7, p.EXTI7, Pull::None);
+    let ch5 = ExtiInput::new(p.PA8, p.EXTI8, Pull::None);
+    let ch6 = ExtiInput::new(p.PA9, p.EXTI9, Pull::None);
+
+    info!("PWM receiver initialized");
+
+    info!("Starting tasks");
 
     _ = spawner.spawn(pwm_task(pwm)).map_err(|_| error!("Error running pwm task"));
-    _ = spawner.spawn(mpu_task(i2c, led)).map_err(|_| error!("Error running pwm task"));
+    // _ = spawner.spawn(mpu_task(i2c, led)).map_err(|_| error!("Error running mpu task"));
+    _ = spawner.spawn(pwm_receiver_channel(ch1, 0)).map_err(|_| error!("Error running receiver CH1"));
+    _ = spawner.spawn(pwm_receiver_channel(ch2, 1)).map_err(|_| error!("Error running receiver CH2"));
+    _ = spawner.spawn(pwm_receiver_channel(ch3, 2)).map_err(|_| error!("Error running receiver CH3"));
+    _ = spawner.spawn(pwm_receiver_channel(ch4, 3)).map_err(|_| error!("Error running receiver CH4"));
+    _ = spawner.spawn(pwm_receiver_channel(ch5, 4)).map_err(|_| error!("Error running receiver CH5"));
+    _ = spawner.spawn(pwm_receiver_channel(ch6, 5)).map_err(|_| error!("Error running receiver CH6"));
 
 }
