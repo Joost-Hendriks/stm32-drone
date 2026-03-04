@@ -4,9 +4,25 @@ use embassy_stm32::gpio::Output;
 use embassy_stm32::mode::Async;
 use embassy_time::{Duration, Timer};
 use mpu6050::*;
+use embassy_sync::channel::Channel;
+use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
+use nalgebra::{Vector2, Vector3};
+
+pub type MpuRcv = Channel<ThreadModeRawMutex, MpuData, 1>;
+
+pub struct MpuData {
+    pub acc: Vector3<f32>,
+    pub gyro: Vector3<f32>,
+    pub temp: f32,
+    pub acc_angles: Vector2<f32>,
+}
 
 #[embassy_executor::task]
-pub async fn mpu_task(i2c: I2c<'static, Async, Master>, mut led: Output<'static>) {
+pub async fn mpu_task(
+    i2c: I2c<'static, Async, Master>, 
+    mut led: Output<'static>,
+    rcv_mpu: & 'static MpuRcv
+) {
 
     info!("Connecting to MPU6050...");
 
@@ -43,54 +59,28 @@ pub async fn mpu_task(i2c: I2c<'static, Async, Master>, mut led: Output<'static>
 
     info!("Starting main loop...");
 
+    let mut acquisition_count = 0;
+
     // Main loop - read sensor data
     loop {
-        led.toggle();
-
-        // Read accelerometer data (in g's)
-        match mpu.get_acc() {
-            Ok(acc) => {
-                info!(
-                    "Accel - X: {}, Y: {}, Z: {}",
-                    acc.x, acc.y, acc.z
-                );
-            }
-            Err(_) => warn!("Failed to read accelerometer"),
+        if acquisition_count % 10 == 0 {
+            led.toggle();
         }
 
-        // Read gyroscope data (in degrees/sec)
-        match mpu.get_gyro() {
-            Ok(gyro) => {
-                info!(
-                    "Gyro  - X: {}, Y: {}, Z: {}",
-                    gyro.x, gyro.y, gyro.z
-                );
-            }
-            Err(_) => warn!("Failed to read gyroscope"),
-        }
+        let acc = mpu.get_acc().unwrap();
+        let gyro = mpu.get_gyro().unwrap();
+        let temp = mpu.get_temp().unwrap();
+        let acc_angles = mpu.get_acc_angles().unwrap();
 
-        // Read temperature (in Celsius)
-        match mpu.get_temp() {
-            Ok(temp) => {
-                info!("Temp: {} °C", temp);
-            }
-            Err(_) => warn!("Failed to read temperature"),
-        }
+        let mpu_data = MpuData {
+            acc: Vector3::new(acc.x, acc.y, acc.z),
+            gyro: Vector3::new(gyro.x, gyro.y, gyro.z),
+            temp,
+            acc_angles: Vector2::new(acc_angles.x, acc_angles.y),
+        };
 
-        // Read roll and pitch angles
-        match mpu.get_acc_angles() {
-            Ok(angles) => {
-                info!(
-                    "Angles - Roll: {}, Pitch: {}",
-                    angles.x, angles.y
-                );
-            }
-            Err(_) => warn!("Failed to read angles"),
-        }
+        rcv_mpu.send(mpu_data).await;
 
-        info!("---");
-
-        // Wait before next reading
-        Timer::after(Duration::from_millis(500)).await;
+        acquisition_count += 1;
     }
 }

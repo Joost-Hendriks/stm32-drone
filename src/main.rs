@@ -9,17 +9,23 @@ use embassy_stm32::i2c::{self, I2c};
 use embassy_stm32::time::hz;
 use embassy_stm32::timer::simple_pwm::{PwmPin, SimplePwm};
 use embassy_stm32::peripherals;
-use embassy_time::Instant;
+use static_cell::StaticCell;
+use embassy_sync::channel::Channel;
 use {defmt_rtt as _, panic_probe as _};
 
 mod mpu;
-mod pwm;
+mod motors;
 mod receiver;
-// mod state_estimator;
+mod controller;
+mod pid;
 
-use crate::mpu::mpu_task;
-use crate::pwm::pwm_task;
+use crate::mpu::{MpuRcv, mpu_task};
+use crate::motors::{MotorsCmd, motors_task};
 use crate::receiver::pwm_receiver_channel;
+use crate::controller::control_loop;
+
+static MOTOR_CMD_CH: StaticCell<MotorsCmd> = StaticCell::new();
+static MPU_RCV_CH: StaticCell<MpuRcv> = StaticCell::new();
 
 // Bind interrupt handlers
 embassy_stm32::bind_interrupts!(struct Irqs {
@@ -83,15 +89,19 @@ async fn main(spawner: Spawner) {
 
     info!("PWM receiver initialized");
 
+    let motor_cmd_ch: & 'static MotorsCmd = MOTOR_CMD_CH.init(Channel::new());
+    let mpu_rcv_ch: & 'static MpuRcv = MPU_RCV_CH.init(Channel::new());
+
     info!("Starting tasks");
 
-    _ = spawner.spawn(pwm_task(pwm)).map_err(|_| error!("Error running pwm task"));
-    // _ = spawner.spawn(mpu_task(i2c, led)).map_err(|_| error!("Error running mpu task"));
-    _ = spawner.spawn(pwm_receiver_channel(ch1, 0)).map_err(|_| error!("Error running receiver CH1"));
-    _ = spawner.spawn(pwm_receiver_channel(ch2, 1)).map_err(|_| error!("Error running receiver CH2"));
-    _ = spawner.spawn(pwm_receiver_channel(ch3, 2)).map_err(|_| error!("Error running receiver CH3"));
-    _ = spawner.spawn(pwm_receiver_channel(ch4, 3)).map_err(|_| error!("Error running receiver CH4"));
-    _ = spawner.spawn(pwm_receiver_channel(ch5, 4)).map_err(|_| error!("Error running receiver CH5"));
-    _ = spawner.spawn(pwm_receiver_channel(ch6, 5)).map_err(|_| error!("Error running receiver CH6"));
+    _ = spawner.spawn(motors_task(pwm, motor_cmd_ch)).map_err(|_| error!("Error running motor task"));
+    _ = spawner.spawn(control_loop(mpu_rcv_ch, motor_cmd_ch)).map_err(|_| error!("Error running control loop"));
+    _ = spawner.spawn(mpu_task(i2c, led, mpu_rcv_ch)).map_err(|_| error!("Error running mpu task"));
+    // _ = spawner.spawn(pwm_receiver_channel(ch1, 0)).map_err(|_| error!("Error running receiver CH1"));
+    // _ = spawner.spawn(pwm_receiver_channel(ch2, 1)).map_err(|_| error!("Error running receiver CH2"));
+    // _ = spawner.spawn(pwm_receiver_channel(ch3, 2)).map_err(|_| error!("Error running receiver CH3"));
+    // _ = spawner.spawn(pwm_receiver_channel(ch4, 3)).map_err(|_| error!("Error running receiver CH4"));
+    // _ = spawner.spawn(pwm_receiver_channel(ch5, 4)).map_err(|_| error!("Error running receiver CH5"));
+    // _ = spawner.spawn(pwm_receiver_channel(ch6, 5)).map_err(|_| error!("Error running receiver CH6"));
 
 }
