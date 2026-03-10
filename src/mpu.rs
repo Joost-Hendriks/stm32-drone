@@ -1,6 +1,5 @@
 use defmt::*;
 use embassy_stm32::i2c::{I2c, mode::Master};
-use embassy_stm32::gpio::Output;
 use embassy_stm32::mode::Async;
 use embassy_time::{Duration, Timer};
 use mpu6050::*;
@@ -19,8 +18,7 @@ pub struct MpuData {
 
 #[embassy_executor::task]
 pub async fn mpu_task(
-    i2c: I2c<'static, Async, Master>, 
-    mut led: Output<'static>,
+    i2c: I2c<'static, Async, Master>,
     rcv_mpu: & 'static MpuRcv
 ) {
 
@@ -35,37 +33,14 @@ pub async fn mpu_task(
     // Initialize the sensor
     let mut delay = embassy_time::Delay;
     match mpu.init(&mut delay) {
-        Ok(_) => {
-            info!("MPU6050 initialized successfully!");
-            // Blink LED rapidly to show success
-            for _ in 0..6 {
-                led.set_low();
-                Timer::after(Duration::from_millis(50)).await;
-                led.set_high();
-                Timer::after(Duration::from_millis(50)).await;
-            }
-        }
-        Err(_) => {
-            error!("Failed to initialize MPU6050!");
-            // Blink LED slowly to show error
-            loop {
-                led.set_low();
-                Timer::after(Duration::from_millis(500)).await;
-                led.set_high();
-                Timer::after(Duration::from_millis(500)).await;
-            }
-        }
+        Ok(_) => info!("MPU6050 initialized successfully!"),
+        Err(_) => error!("Failed to initialize MPU6050!"),
     }
 
-    info!("Starting main loop...");
-
-    let mut acquisition_count = 0;
+    info!("Starting mpu loop...");
 
     // Main loop - read sensor data
     loop {
-        if acquisition_count % 10 == 0 {
-            led.toggle();
-        }
 
         let acc = mpu.get_acc().unwrap();
         let gyro = mpu.get_gyro().unwrap();
@@ -80,7 +55,5 @@ pub async fn mpu_task(
         };
 
         rcv_mpu.send(mpu_data).await;
-
-        acquisition_count += 1;
     }
 }

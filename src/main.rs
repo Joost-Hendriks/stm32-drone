@@ -95,8 +95,8 @@ async fn main(spawner: Spawner) {
     info!("Starting tasks");
 
     _ = spawner.spawn(motors_task(pwm, motor_cmd_ch)).map_err(|_| error!("Error running motor task"));
-    _ = spawner.spawn(control_loop(mpu_rcv_ch, motor_cmd_ch)).map_err(|_| error!("Error running control loop"));
-    _ = spawner.spawn(mpu_task(i2c, led, mpu_rcv_ch)).map_err(|_| error!("Error running mpu task"));
+    _ = spawner.spawn(control_loop(mpu_rcv_ch, motor_cmd_ch, led)).map_err(|_| error!("Error running control loop"));
+    _ = spawner.spawn(mpu_task(i2c, mpu_rcv_ch)).map_err(|_| error!("Error running mpu task"));
     // _ = spawner.spawn(pwm_receiver_channel(ch1, 0)).map_err(|_| error!("Error running receiver CH1"));
     // _ = spawner.spawn(pwm_receiver_channel(ch2, 1)).map_err(|_| error!("Error running receiver CH2"));
     // _ = spawner.spawn(pwm_receiver_channel(ch3, 2)).map_err(|_| error!("Error running receiver CH3"));
