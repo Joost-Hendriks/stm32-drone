@@ -12,6 +12,11 @@ use crate::mpu::MpuRcv;
 const CYCLE_TIME: f64 = 0.01;
 const GRAVITY: f64 = 9.81;
 
+// Number of loops to run the EKF before enabling the PID.
+// Prevents integral accumulation during the noisy EKF convergence transient.
+// At 100 Hz this is 1 second.
+const EKF_WARMUP_LOOPS: u32 = 100;
+
 #[embassy_executor::task]
 pub async fn control_loop(
     mpu_rcv: & 'static MpuRcv, 
@@ -62,17 +67,31 @@ pub async fn control_loop(
         let state = ekf.get_state();
         // info!("Updated State Vector: {:?}", Debug2Format(&state));
 
+        // Hold motors at idle and skip PID until the EKF has converged.
+        if loop_count < EKF_WARMUP_LOOPS {
+            cmd_motors.send(Vector4::<f32>::zeros()).await;
+            Timer::at(start_time + Duration::from_millis((CYCLE_TIME * 1000.0) as u64)).await;
+            loop_count += 1;
+            continue;
+        }
+
+        // First post-warmup loop: reset PID so last_update starts fresh
+        // and no stale dt spike carries over from the warmup period.
+        if loop_count == EKF_WARMUP_LOOPS {
+            pid = PID::new();
+        }
+
         let attitude = UnitQuaternion::from_quaternion(Quaternion::new(state[0], state[1], state[2], state[3]));
         // Bias-corrected body angular rate (rad/s)
         let omega = Vector3::new(gyro_data[0] - state[4], gyro_data[1] - state[5], gyro_data[2] - state[6]);
         let desired_attitude = UnitQuaternion::from_euler_angles(0., 0., 0.0);
         // Hover throttle: fraction of total available thrust to hold altitude.
-        // Tune this to mg / (4 * THRUST_MAX_PER_MOTOR). Must be in [0.0, 1.0].
-        let throttle = 1.;
+        // Start low (~0.3) and increase slowly while holding the drone until
+        // it becomes light. Theoretical value: mg / (4 * THRUST_MAX_PER_MOTOR).
+        let throttle = 0.7_f64;
 
         let power_motors = pid.control(attitude, omega, desired_attitude, throttle);
 
-        // let torque = Vector4::new(0., 0., 0., 0.);
         cmd_motors.send(power_motors).await;
 
         Timer::at(start_time + Duration::from_millis((CYCLE_TIME * 1000.0) as u64)).await;

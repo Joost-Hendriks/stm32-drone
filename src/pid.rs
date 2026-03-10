@@ -52,7 +52,9 @@ impl PID {
         let dt = match self.last_update {
             // First call: no previous timestamp, skip integral accumulation.
             None => 0.0,
-            Some(t) => t.elapsed().as_micros() as f64 / 1_000_000.0,
+            // Cap at 2× the expected cycle time to prevent a large integral
+            // spike if the loop is ever delayed (e.g. channel back-pressure).
+            Some(t) => (t.elapsed().as_micros() as f64 / 1_000_000.0).min(0.02),
         };
 
         // Accumulate integral for roll and pitch only; yaw is PD.
