@@ -12,8 +12,6 @@ pub type MpuRcv = Channel<ThreadModeRawMutex, MpuData, 1>;
 pub struct MpuData {
     pub acc: Vector3<f32>,
     pub gyro: Vector3<f32>,
-    pub temp: f32,
-    pub acc_angles: Vector2<f32>,
 }
 
 #[embassy_executor::task]
@@ -44,14 +42,10 @@ pub async fn mpu_task(
 
         let acc = mpu.get_acc().unwrap();
         let gyro = mpu.get_gyro().unwrap();
-        let temp = mpu.get_temp().unwrap();
-        let acc_angles = mpu.get_acc_angles().unwrap();
 
         let mpu_data = MpuData {
             acc: Vector3::new(acc.x, acc.y, acc.z),
             gyro: Vector3::new(gyro.x, gyro.y, gyro.z),
-            temp,
-            acc_angles: Vector2::new(acc_angles.x, acc_angles.y),
         };
 
         rcv_mpu.send(mpu_data).await;

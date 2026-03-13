@@ -9,8 +9,8 @@ use crate::pid::PID;
 use crate::mpu::MpuRcv;
 
 // Cycle time in seconds
-const CYCLE_TIME: f64 = 0.01;
-const GRAVITY: f64 = 9.81;
+const CYCLE_TIME: f32 = 0.01;
+const GRAVITY: f32 = 9.81;
 
 // Number of loops to run the EKF before enabling the PID.
 // Prevents integral accumulation during the noisy EKF convergence transient.
@@ -19,7 +19,7 @@ const EKF_WARMUP_LOOPS: u32 = 100;
 
 #[embassy_executor::task]
 pub async fn control_loop(
-    mpu_rcv: & 'static MpuRcv, 
+    mpu_rcv: & 'static MpuRcv,
     cmd_motors: & 'static MotorsCmd,
     mut led: Output<'static>,
 ) -> ! {
@@ -28,9 +28,9 @@ pub async fn control_loop(
     // close to the true attitude instead of the identity quaternion.
     let first_sample = mpu_rcv.receive().await;
     let init_accel = [
-        first_sample.acc[1] as f64,
-        first_sample.acc[0] as f64,
-        -first_sample.acc[2] as f64,
+        -first_sample.acc[0] * GRAVITY,
+        first_sample.acc[1] * GRAVITY,
+        -first_sample.acc[2] * GRAVITY,
     ];
     let mut ekf = EKF::new(Some(init_accel));
     let mut pid = PID::new();
@@ -48,16 +48,14 @@ pub async fn control_loop(
         let mpu_data = mpu_rcv.receive().await;
 
         // Get gyro data
-        let gyro_data = [mpu_data.gyro[1] as f64, mpu_data.gyro[0] as f64, -mpu_data.gyro[2] as f64];
-        // let gyro_data = [0 as f64, 0 as f64, 0 as f64];
+        let gyro_data = [-mpu_data.gyro[0], mpu_data.gyro[1], -mpu_data.gyro[2]];
         // info!("Gyro data: {:?}", gyro_data[2]);
 
         // Prediction phase of the EKF
         ekf.predict(gyro_data, CYCLE_TIME);
 
         // Get acceleration data — sensor returns g, EKF expects m/s²
-        let accel_data = [mpu_data.acc[1] as f64 * GRAVITY, mpu_data.acc[0] as f64 * GRAVITY, -mpu_data.acc[2] as f64 * GRAVITY];
-        // let accel_data = [0 as f64, 0 as f64, 0 as f64];
+        let accel_data = [-mpu_data.acc[0] * GRAVITY, mpu_data.acc[1] * GRAVITY, -mpu_data.acc[2] * GRAVITY];
         // info!("Acc data: {:?}", accel_data[2]);
 
         // Update phase of the EKF
@@ -65,7 +63,7 @@ pub async fn control_loop(
 
         // Get the updated state of the EKF
         let state = ekf.get_state();
-        // info!("Updated State Vector: {:?}", Debug2Format(&state));
+        info!("Updated State Vector: {:?}", Debug2Format(&state));
 
         // Hold motors at idle and skip PID until the EKF has converged.
         if loop_count < EKF_WARMUP_LOOPS {
@@ -88,10 +86,12 @@ pub async fn control_loop(
         // Hover throttle: fraction of total available thrust to hold altitude.
         // Start low (~0.3) and increase slowly while holding the drone until
         // it becomes light. Theoretical value: mg / (4 * THRUST_MAX_PER_MOTOR).
-        let throttle = 0.7_f64;
+        let throttle = 0.3_f32;
 
         let power_motors = pid.control(attitude, omega, desired_attitude, throttle);
+        // let power_motors = Vector4::new(0.3,0.3,0.3,0.3);
 
+        // info!("Power motors: {:?}", Debug2Format(&power_motors));
         cmd_motors.send(power_motors).await;
 
         Timer::at(start_time + Duration::from_millis((CYCLE_TIME * 1000.0) as u64)).await;

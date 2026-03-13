@@ -49,6 +49,7 @@ async fn main(spawner: Spawner) {
     let mut i2c_config = i2c::Config::default();
     i2c_config.scl_pullup = true;
     i2c_config.sda_pullup = true;
+    i2c_config.frequency = hz(400_000);
 
     let i2c = I2c::new(
         p.I2C1,

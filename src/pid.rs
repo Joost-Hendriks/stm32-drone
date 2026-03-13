@@ -3,38 +3,38 @@ use embassy_time::Instant;
 use nalgebra::Vector4;
 
 // Inertia tensor (kg·m²), matching drone-modelling/main.py
-const IXX: f64 = 0.014;
-const IYY: f64 = 0.014;
-const IZZ: f64 = 0.028;
+const IXX: f32 = 0.014;
+const IYY: f32 = 0.014;
+const IZZ: f32 = 0.028;
 
 // Roll / pitch PID gains, matching drone-modelling/main.py
-const KP_ROLL_PITCH: f64 = 8.0;
-const KI_ROLL_PITCH: f64 = 0.5;
-const KD_ROLL_PITCH: f64 = 2.0;
+const KP_ROLL_PITCH: f32 = 2.0;
+const KI_ROLL_PITCH: f32 = 0.0;
+const KD_ROLL_PITCH: f32 = 0.5;
 
 // Yaw PD gains (no integral term), matching drone-modelling/main.py
-const KP_YAW: f64 = 5.0;
-const KD_YAW: f64 = 1.0;
+const KP_YAW: f32 = 5.0;
+const KD_YAW: f32 = 1.0;
 
-// Motor mixing geometry (250mm X-frame)
-const ARM_LENGTH: f64 = 0.225;          // m — centre to motor
-const THRUST_MAX_PER_MOTOR: f64 = 7.85; // N
+// Motor mixing geometry (450mm X-frame)
+const ARM_LENGTH: f32 = 0.225;          // m — centre to motor
+const THRUST_MAX_PER_MOTOR: f32 = 7.85; // N
 
 // Maximum achievable roll / pitch torque:
 //   one arm pair at full differential → L * 2 * F_max
-const MAX_TORQUE_RP: f64 = ARM_LENGTH * THRUST_MAX_PER_MOTOR * 2.0;
+const MAX_TORQUE_RP: f32 = ARM_LENGTH * THRUST_MAX_PER_MOTOR * 2.0;
 
 // Integral anti-windup clamp: limits the integral so its contribution
 // (Ki * integral) never exceeds the maximum achievable torque.
-const INTEGRAL_LIMIT: f64 = MAX_TORQUE_RP / KI_ROLL_PITCH;
+const INTEGRAL_LIMIT: f32 = MAX_TORQUE_RP / KI_ROLL_PITCH;
 
 // Drag/thrust ratio for yaw (~2 % is typical for 5-inch props).
 // Increase if yaw response feels sluggish; decrease if it oscillates.
-const K_YAW: f64 = 0.02;                // m
-const MAX_TORQUE_YAW: f64 = K_YAW * THRUST_MAX_PER_MOTOR * 2.0;
+const K_YAW: f32 = 0.02;                // m
+const MAX_TORQUE_YAW: f32 = K_YAW * THRUST_MAX_PER_MOTOR * 2.0;
 
 pub struct PID {
-    integral: Vector3<f64>,
+    integral: Vector3<f32>,
     last_update: Option<Instant>,
 }
 
@@ -48,13 +48,13 @@ impl PID {
 
     // Returns commanded torque [N·m] such that I*alpha = tau - omega x (I*omega).
     // error = actual - desired (positive when over-shooting).
-    fn compute_torque(&mut self, error: Vector3<f64>, omega: Vector3<f64>) -> Vector3<f64> {
+    fn compute_torque(&mut self, error: Vector3<f32>, omega: Vector3<f32>) -> Vector3<f32> {
         let dt = match self.last_update {
             // First call: no previous timestamp, skip integral accumulation.
             None => 0.0,
             // Cap at 2× the expected cycle time to prevent a large integral
             // spike if the loop is ever delayed (e.g. channel back-pressure).
-            Some(t) => (t.elapsed().as_micros() as f64 / 1_000_000.0).min(0.02),
+            Some(t) => (t.elapsed().as_micros() as f32 / 1_000_000.0).min(0.02),
         };
 
         // Accumulate integral for roll and pitch only; yaw is PD.
@@ -92,10 +92,10 @@ impl PID {
     /// The caller (motors_task) maps 0.0 → 1000 µs and 1.0 → 2000 µs.
     pub fn control(
         &mut self,
-        attitude: UnitQuaternion<f64>,
-        omega: Vector3<f64>,           // bias-corrected body angular rate (rad/s)
-        desired_attitude: UnitQuaternion<f64>,
-        throttle: f64,  // 0.0–1.0, fraction of total available thrust
+        attitude: UnitQuaternion<f32>,
+        omega: Vector3<f32>,           // bias-corrected body angular rate (rad/s)
+        desired_attitude: UnitQuaternion<f32>,
+        throttle: f32,  // 0.0–1.0, fraction of total available thrust
     ) -> Vector4<f32> {
         let tau = self.compute_torque(
             attitude.scaled_axis() - desired_attitude.scaled_axis(),
@@ -110,12 +110,12 @@ impl PID {
         // X-frame motor mixing.
         // Motor layout (top view):  M1(FR) M2(FL)
         //                           M4(BR) M3(BL)
-        // Spin directions:          CCW     CW
-        //                           CW      CCW
-        let m1 = (throttle - roll + pitch - yaw).clamp(0.0, 1.0) as f32;
-        let m2 = (throttle + roll + pitch + yaw).clamp(0.0, 1.0) as f32;
-        let m3 = (throttle + roll - pitch - yaw).clamp(0.0, 1.0) as f32;
-        let m4 = (throttle - roll - pitch + yaw).clamp(0.0, 1.0) as f32;
+        // Spin directions:          CW     CCW
+        //                           CCW    CW
+        let m1 = (throttle - roll + pitch - yaw).clamp(0.0, 1.0);
+        let m2 = (throttle + roll + pitch + yaw).clamp(0.0, 1.0);
+        let m3 = (throttle + roll - pitch - yaw).clamp(0.0, 1.0);
+        let m4 = (throttle - roll - pitch + yaw).clamp(0.0, 1.0);
 
         Vector4::new(m1, m2, m3, m4)
     }
