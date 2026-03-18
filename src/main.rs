@@ -10,6 +10,7 @@ use embassy_stm32::time::hz;
 use embassy_stm32::timer::simple_pwm::{PwmPin, SimplePwm};
 use embassy_stm32::peripherals;
 use static_cell::StaticCell;
+use nalgebra::Vector4;
 use embassy_sync::channel::Channel;
 use {defmt_rtt as _, panic_probe as _};
 
@@ -96,6 +97,11 @@ async fn main(spawner: Spawner) {
     info!("Starting tasks");
 
     _ = spawner.spawn(motors_task(pwm, motor_cmd_ch)).map_err(|_| error!("Error running motor task"));
+
+    // Fill buffer and wait for buffer to make sure the motors are running when proceeding to other tasks.
+    motor_cmd_ch.send(Vector4::new(0.0,0.0,0.0,0.0)).await;
+    motor_cmd_ch.send(Vector4::new(0.0,0.0,0.0,0.0)).await;
+
     _ = spawner.spawn(control_loop(mpu_rcv_ch, motor_cmd_ch, led)).map_err(|_| error!("Error running control loop"));
     _ = spawner.spawn(mpu_task(i2c, mpu_rcv_ch)).map_err(|_| error!("Error running mpu task"));
     // _ = spawner.spawn(pwm_receiver_channel(ch1, 0)).map_err(|_| error!("Error running receiver CH1"));

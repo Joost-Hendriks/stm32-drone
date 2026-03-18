@@ -1,3 +1,4 @@
+use defmt::*;
 use nalgebra::{Matrix3, Vector3, UnitQuaternion};
 use embassy_time::Instant;
 use nalgebra::Vector4;
@@ -9,12 +10,12 @@ const IZZ: f32 = 0.028;
 
 // Roll / pitch PID gains, matching drone-modelling/main.py
 const KP_ROLL_PITCH: f32 = 2.0;
-const KI_ROLL_PITCH: f32 = 0.0;
+const KI_ROLL_PITCH: f32 = 0.1;
 const KD_ROLL_PITCH: f32 = 0.5;
 
 // Yaw PD gains (no integral term), matching drone-modelling/main.py
-const KP_YAW: f32 = 5.0;
-const KD_YAW: f32 = 1.0;
+const KP_YAW: f32 = 0.0;
+const KD_YAW: f32 = 0.0;
 
 // Motor mixing geometry (450mm X-frame)
 const ARM_LENGTH: f32 = 0.225;          // m — centre to motor
@@ -26,15 +27,16 @@ const MAX_TORQUE_RP: f32 = ARM_LENGTH * THRUST_MAX_PER_MOTOR * 2.0;
 
 // Integral anti-windup clamp: limits the integral so its contribution
 // (Ki * integral) never exceeds the maximum achievable torque.
-const INTEGRAL_LIMIT: f32 = MAX_TORQUE_RP / KI_ROLL_PITCH;
+const INTEGRAL_LIMIT: f32 = if KI_ROLL_PITCH > 0.0 { MAX_TORQUE_RP / KI_ROLL_PITCH } else { 0.0 };
 
-// Drag/thrust ratio for yaw (~2 % is typical for 5-inch props).
-// Increase if yaw response feels sluggish; decrease if it oscillates.
-const K_YAW: f32 = 0.02;                // m
-const MAX_TORQUE_YAW: f32 = K_YAW * THRUST_MAX_PER_MOTOR * 2.0;
+// Low-pass filter cutoff for the gyro rate used in the D-term (Hz).
+// Lower = smoother but more phase lag; start around 20–30 Hz.
+const GYRO_LPF_CUTOFF_HZ: f32 = 50.0;
+
 
 pub struct PID {
     integral: Vector3<f32>,
+    omega_filtered: Vector3<f32>,
     last_update: Option<Instant>,
 }
 
@@ -42,6 +44,7 @@ impl PID {
     pub fn new() -> Self {
         PID {
             integral: Vector3::zeros(),
+            omega_filtered: Vector3::zeros(),
             last_update: None,
         }
     }
@@ -50,12 +53,17 @@ impl PID {
     // error = actual - desired (positive when over-shooting).
     fn compute_torque(&mut self, error: Vector3<f32>, omega: Vector3<f32>) -> Vector3<f32> {
         let dt = match self.last_update {
-            // First call: no previous timestamp, skip integral accumulation.
             None => 0.0,
-            // Cap at 2× the expected cycle time to prevent a large integral
-            // spike if the loop is ever delayed (e.g. channel back-pressure).
-            Some(t) => (t.elapsed().as_micros() as f32 / 1_000_000.0).min(0.02),
+            Some(t) => t.elapsed().as_micros() as f32 / 1_000_000.0,
         };
+
+        // First-order low-pass filter on gyro rate (used for D-term only).
+        // alpha → 1 keeps more of the old value (heavier filtering).
+        // tau = 1 / (2π * fc);  alpha = tau / (tau + dt)
+        let tau_lpf = 1.0 / (2.0 * core::f32::consts::PI * GYRO_LPF_CUTOFF_HZ);
+        let alpha = if dt > 0.0 { tau_lpf / (tau_lpf + dt) } else { 1.0 };
+        self.omega_filtered = alpha * self.omega_filtered + (1.0 - alpha) * omega;
+        let omega_d = self.omega_filtered;
 
         // Accumulate integral for roll and pitch only; yaw is PD.
         // Clamp to prevent windup when the drone is held on the ground or
@@ -67,15 +75,17 @@ impl PID {
 
         // Desired angular acceleration per axis.
         // Negated because error = actual - desired, so correction = -Kp*error.
+        // D-term uses filtered omega to suppress gyro noise.
         let alpha_des = Vector3::new(
-            -(KP_ROLL_PITCH * error.x + KI_ROLL_PITCH * self.integral.x + KD_ROLL_PITCH * omega.x),
-            -(KP_ROLL_PITCH * error.y + KI_ROLL_PITCH * self.integral.y + KD_ROLL_PITCH * omega.y),
-            -(KP_YAW        * error.z                                    + KD_YAW        * omega.z),
+            -(KP_ROLL_PITCH * error.x + KI_ROLL_PITCH * self.integral.x + KD_ROLL_PITCH * omega_d.x),
+            -(KP_ROLL_PITCH * error.y + KI_ROLL_PITCH * self.integral.y + KD_ROLL_PITCH * omega_d.y),
+            -(KP_YAW        * error.z                                   + KD_YAW        * omega_d.z),
         );
 
         // Full inverse-dynamics torque (Euler's rotation equation):
         //   tau = I * alpha_des + omega x (I * omega)
         let torque = i * alpha_des + omega.cross(&(i * omega));
+        // let torque = i * alpha_des;
 
         self.last_update = Some(Instant::now());
 
@@ -98,20 +108,22 @@ impl PID {
         throttle: f32,  // 0.0–1.0, fraction of total available thrust
     ) -> Vector4<f32> {
         let tau = self.compute_torque(
-            attitude.scaled_axis() - desired_attitude.scaled_axis(),
+            (desired_attitude.inverse() * attitude).scaled_axis(),
             omega,
         );
 
         // Normalize torques to [-1, 1] using the physical limits of the frame.
         let roll  = tau.x / MAX_TORQUE_RP;
         let pitch = tau.y / MAX_TORQUE_RP;
-        let yaw   = tau.z / MAX_TORQUE_YAW;
+        // Yaw is excluded from the motor mix: no magnetometer means EKF yaw
+        // drifts freely, so there is no reliable error signal to close the loop.
+        let yaw   = 0.0_f32;
 
         // X-frame motor mixing.
-        // Motor layout (top view):  M1(FR) M2(FL)
-        //                           M4(BR) M3(BL)
+        // Motor layout (top view):  M2(FL) M1(FR)
+        //                           M3(BL) M4(BR)
         // Spin directions:          CW     CCW
-        //                           CCW    CW
+        //                           CCW     CW
         let m1 = (throttle - roll + pitch - yaw).clamp(0.0, 1.0);
         let m2 = (throttle + roll + pitch + yaw).clamp(0.0, 1.0);
         let m3 = (throttle + roll - pitch - yaw).clamp(0.0, 1.0);

@@ -14,7 +14,6 @@ pub type MotorsCmd = Channel<ThreadModeRawMutex, Vector4<f32>, 1>;
 pub async fn motors_task(mut pwm: SimplePwm<'static, TIM2>, cmd_channel: & 'static MotorsCmd) -> ! {
 
     let max_duty = pwm.ch1().max_duty_cycle();
-    info!("Max duty: {}", max_duty);
 
     // Enable all 4 channels
     pwm.ch1().enable();
