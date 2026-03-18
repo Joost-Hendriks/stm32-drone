@@ -11,7 +11,7 @@ use embassy_stm32::timer::simple_pwm::{PwmPin, SimplePwm};
 use embassy_stm32::peripherals;
 use static_cell::StaticCell;
 use nalgebra::Vector4;
-use embassy_sync::channel::Channel;
+use mpu6050::*;
 use {defmt_rtt as _, panic_probe as _};
 
 mod mpu;
@@ -20,19 +20,27 @@ mod receiver;
 mod controller;
 mod pid;
 
-use crate::mpu::{MpuRcv, mpu_task};
-use crate::motors::{MotorsCmd, motors_task};
-use crate::receiver::pwm_receiver_channel;
+use crate::mpu::initialize_mpu;
+use crate::motors::initialize_motors;
 use crate::controller::control_loop;
-
-static MOTOR_CMD_CH: StaticCell<MotorsCmd> = StaticCell::new();
-static MPU_RCV_CH: StaticCell<MpuRcv> = StaticCell::new();
 
 // Bind interrupt handlers
 embassy_stm32::bind_interrupts!(struct Irqs {
     I2C1_EV => embassy_stm32::i2c::EventInterruptHandler<peripherals::I2C1>;
     I2C1_ER => embassy_stm32::i2c::ErrorInterruptHandler<peripherals::I2C1>;
+    EXTI4   => embassy_stm32::exti::InterruptHandler<embassy_stm32::interrupt::typelevel::EXTI4>;
+    EXTI9_5 => embassy_stm32::exti::InterruptHandler<embassy_stm32::interrupt::typelevel::EXTI9_5>;
 });
+
+static MOTORS: StaticCell<motors::Motors> = StaticCell::new();
+static MPU: StaticCell<Mpu6050<I2c<'static, embassy_stm32::mode::Async, embassy_stm32::i2c::mode::Master>>> = StaticCell::new();
+
+static CH1: StaticCell<ExtiInput> = StaticCell::new();
+static CH2: StaticCell<ExtiInput> = StaticCell::new();
+static CH3: StaticCell<ExtiInput> = StaticCell::new();
+static CH4: StaticCell<ExtiInput> = StaticCell::new();
+static CH5: StaticCell<ExtiInput> = StaticCell::new();
+static CH6: StaticCell<ExtiInput> = StaticCell::new();
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -64,6 +72,9 @@ async fn main(spawner: Spawner) {
 
     info!("I2C initialized");
 
+    let mpu = initialize_mpu(i2c).await;
+    let mpu = MPU.init(mpu);
+
     // Initialize PWM on TIM2 CH1-CH4 at 50Hz for ESC/servo control
     // CH1=PA0, CH2=PA1, CH3=PA2, CH4=PA3
     let ch1_pin = PwmPin::new(p.PA0, OutputType::PushPull);
@@ -80,30 +91,26 @@ async fn main(spawner: Spawner) {
         Default::default(),
     );
 
-    info!("PWM initialized");
+    info!("PWM motors initialized");
 
-    let ch1 = ExtiInput::new(p.PA4, p.EXTI4, Pull::None);
-    let ch2 = ExtiInput::new(p.PA5, p.EXTI5, Pull::None);
-    let ch3 = ExtiInput::new(p.PA6, p.EXTI6, Pull::None);
-    let ch4 = ExtiInput::new(p.PA7, p.EXTI7, Pull::None);
-    let ch5 = ExtiInput::new(p.PA8, p.EXTI8, Pull::None);
-    let ch6 = ExtiInput::new(p.PA9, p.EXTI9, Pull::None);
+    let motors = MOTORS.init(initialize_motors(pwm).await);
+
+
+    let ch1 = CH1.init(ExtiInput::new(p.PA4, p.EXTI4, Pull::None, Irqs));
+    let ch2 = CH2.init(ExtiInput::new(p.PA5, p.EXTI5, Pull::None, Irqs));
+    let ch3 = CH3.init(ExtiInput::new(p.PA6, p.EXTI6, Pull::None, Irqs));
+    let ch4 = CH4.init(ExtiInput::new(p.PA7, p.EXTI7, Pull::None, Irqs));
+    let ch5 = CH5.init(ExtiInput::new(p.PA8, p.EXTI8, Pull::None, Irqs));
+    let ch6 = CH6.init(ExtiInput::new(p.PA9, p.EXTI9, Pull::None, Irqs));
+
+    let channels: [&'static mut ExtiInput<'static>; 6] = [ch1, ch2, ch3, ch4, ch5, ch6];
+
 
     info!("PWM receiver initialized");
 
-    let motor_cmd_ch: & 'static MotorsCmd = MOTOR_CMD_CH.init(Channel::new());
-    let mpu_rcv_ch: & 'static MpuRcv = MPU_RCV_CH.init(Channel::new());
-
     info!("Starting tasks");
 
-    _ = spawner.spawn(motors_task(pwm, motor_cmd_ch)).map_err(|_| error!("Error running motor task"));
-
-    // Fill buffer and wait for buffer to make sure the motors are running when proceeding to other tasks.
-    motor_cmd_ch.send(Vector4::new(0.0,0.0,0.0,0.0)).await;
-    motor_cmd_ch.send(Vector4::new(0.0,0.0,0.0,0.0)).await;
-
-    _ = spawner.spawn(control_loop(mpu_rcv_ch, motor_cmd_ch, led)).map_err(|_| error!("Error running control loop"));
-    _ = spawner.spawn(mpu_task(i2c, mpu_rcv_ch)).map_err(|_| error!("Error running mpu task"));
+    _ = spawner.spawn(control_loop(mpu, motors, led, channels)).map_err(|_| error!("Error running control loop"));
     // _ = spawner.spawn(pwm_receiver_channel(ch1, 0)).map_err(|_| error!("Error running receiver CH1"));
     // _ = spawner.spawn(pwm_receiver_channel(ch2, 1)).map_err(|_| error!("Error running receiver CH2"));
     // _ = spawner.spawn(pwm_receiver_channel(ch3, 2)).map_err(|_| error!("Error running receiver CH3"));

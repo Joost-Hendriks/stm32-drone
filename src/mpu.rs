@@ -3,22 +3,14 @@ use embassy_stm32::i2c::{I2c, mode::Master};
 use embassy_stm32::mode::Async;
 use embassy_time::{Duration, Timer};
 use mpu6050::*;
-use embassy_sync::channel::Channel;
-use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
-use nalgebra::{Vector2, Vector3};
-
-pub type MpuRcv = Channel<ThreadModeRawMutex, MpuData, 1>;
+use nalgebra::Vector3;
 
 pub struct MpuData {
     pub acc: Vector3<f32>,
     pub gyro: Vector3<f32>,
 }
 
-#[embassy_executor::task]
-pub async fn mpu_task(
-    i2c: I2c<'static, Async, Master>,
-    rcv_mpu: & 'static MpuRcv
-) {
+pub async fn initialize_mpu(i2c: I2c<'static, Async, Master>) -> Mpu6050<I2c<'static, Async, Master>> {
 
     info!("Connecting to MPU6050...");
 
@@ -34,20 +26,16 @@ pub async fn mpu_task(
         Ok(_) => info!("MPU6050 initialized successfully!"),
         Err(_) => error!("Failed to initialize MPU6050!"),
     }
+    mpu
+}
 
-    info!("Starting mpu loop...");
+pub async fn read_mpu(mpu: &mut Mpu6050<I2c<'static, Async, Master>>) -> MpuData {
 
-    // Main loop - read sensor data
-    loop {
+    let acc = mpu.get_acc().unwrap();
+    let gyro = mpu.get_gyro().unwrap();
 
-        let acc = mpu.get_acc().unwrap();
-        let gyro = mpu.get_gyro().unwrap();
-
-        let mpu_data = MpuData {
-            acc: Vector3::new(acc.x, acc.y, acc.z),
-            gyro: Vector3::new(gyro.x, gyro.y, gyro.z),
-        };
-
-        rcv_mpu.send(mpu_data).await;
+    MpuData {
+        acc: Vector3::new(acc.x, acc.y, acc.z),
+        gyro: Vector3::new(gyro.x, gyro.y, gyro.z),
     }
 }

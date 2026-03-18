@@ -9,9 +9,9 @@ const IYY: f32 = 0.014;
 const IZZ: f32 = 0.028;
 
 // Roll / pitch PID gains, matching drone-modelling/main.py
-const KP_ROLL_PITCH: f32 = 2.0;
-const KI_ROLL_PITCH: f32 = 0.1;
-const KD_ROLL_PITCH: f32 = 0.5;
+const KP_ROLL_PITCH: f32 = 5.0;
+const KI_ROLL_PITCH: f32 = 0.0;
+const KD_ROLL_PITCH: f32 = 0.0;
 
 // Yaw PD gains (no integral term), matching drone-modelling/main.py
 const KP_YAW: f32 = 0.0;

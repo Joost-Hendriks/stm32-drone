@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 embassy-executor = { version = "0.7", features = ["arch-cortex-m", "executor-thread"] }
-embassy-stm32 = { version = "0.4", features = [
+embassy-stm32 = { version = "0.5", features = [
     "stm32f401cc", 
     "time-driver-any", 
     "exti", 
