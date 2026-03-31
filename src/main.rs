@@ -10,7 +10,6 @@ use embassy_stm32::time::hz;
 use embassy_stm32::timer::simple_pwm::{PwmPin, SimplePwm};
 use embassy_stm32::peripherals;
 use static_cell::StaticCell;
-use nalgebra::Vector4;
 use mpu6050::*;
 use {defmt_rtt as _, panic_probe as _};
 
@@ -43,7 +42,7 @@ static CH5: StaticCell<ExtiInput> = StaticCell::new();
 static CH6: StaticCell<ExtiInput> = StaticCell::new();
 
 #[embassy_executor::main]
-async fn main(spawner: Spawner) {
+async fn main(_spawner: Spawner) {
     info!("Starting STM32");
 
     // Initialize STM32 peripherals
@@ -58,7 +57,7 @@ async fn main(spawner: Spawner) {
     let mut i2c_config = i2c::Config::default();
     i2c_config.scl_pullup = true;
     i2c_config.sda_pullup = true;
-    i2c_config.frequency = hz(400_000);
+    i2c_config.frequency = hz(200_000);
 
     let i2c = I2c::new(
         p.I2C1,
@@ -109,8 +108,9 @@ async fn main(spawner: Spawner) {
     info!("PWM receiver initialized");
 
     info!("Starting tasks");
+    control_loop(mpu, motors, led, channels).await;
 
-    _ = spawner.spawn(control_loop(mpu, motors, led, channels)).map_err(|_| error!("Error running control loop"));
+    // _ = spawner.spawn(control_loop(mpu, motors, led, channels)).map_err(|_| error!("Error running control loop"));
     // _ = spawner.spawn(pwm_receiver_channel(ch1, 0)).map_err(|_| error!("Error running receiver CH1"));
     // _ = spawner.spawn(pwm_receiver_channel(ch2, 1)).map_err(|_| error!("Error running receiver CH2"));
     // _ = spawner.spawn(pwm_receiver_channel(ch3, 2)).map_err(|_| error!("Error running receiver CH3"));

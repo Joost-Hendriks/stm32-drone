@@ -1,4 +1,3 @@
-use defmt::*;
 use embassy_stm32::exti::ExtiInput;
 use embassy_time::Instant;
 
@@ -14,7 +13,7 @@ use embassy_time::Instant;
 
 
 /// Measures a single PWM pulse and returns its width in microseconds.
-pub async fn pwm_receiver_channel(pin: &mut ExtiInput<'static>, idx: usize) -> u64 {
+pub async fn pwm_receiver_channel(pin: &mut ExtiInput<'static>) -> u64 {
     pin.wait_for_rising_edge().await;
     let t_rise = Instant::now();
 

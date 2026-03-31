@@ -13,18 +13,20 @@ use crate::pid::PID;
 use crate::mpu::read_mpu;
 use crate::receiver::pwm_receiver_channel;
 
-// Cycle time needs to be longer than total loop time 
+// Cycle time needs to be longer than total loop time
 // to give room for PWM signal.
-const CYCLE_TIME_MS: u64 = 10;
+const CYCLE_TIME_MS: u64 = 25;
+// Number of cycles to let the EKF converge before enabling control.
+// At 25 ms/cycle, 100 cycles = 2.5 s.
+const EKF_WARMUP_CYCLES: u32 = 100;
 const GRAVITY: f32 = 9.81;
 
-#[embassy_executor::task]
 pub async fn control_loop(
     mpu: &'static mut Mpu6050<I2c<'static, Async, Master>>,
     motors: &'static mut Motors,
     mut led: Output<'static>,
     channels: [&'static mut ExtiInput<'static>; 6]
-) -> ! {
+) {
 
     // Collect samples at rest to estimate gyro bias and initial orientation.
     const CALIB_SAMPLES: usize = 200;
@@ -33,10 +35,10 @@ pub async fn control_loop(
     for _ in 0..CALIB_SAMPLES {
         let s = read_mpu(mpu).await;
         gyro_sum[0] += -s.gyro[0];
-        gyro_sum[1] +=  s.gyro[1];
+        gyro_sum[1] += s.gyro[1];
         gyro_sum[2] += -s.gyro[2];
         accel_sum[0] += -s.acc[0];
-        accel_sum[1] +=  s.acc[1];
+        accel_sum[1] += s.acc[1];
         accel_sum[2] += -s.acc[2];
     }
     let n = CALIB_SAMPLES as f32;
@@ -44,13 +46,13 @@ pub async fn control_loop(
     let init_accel = [accel_sum[0] / n * GRAVITY, accel_sum[1] / n * GRAVITY, accel_sum[2] / n * GRAVITY];
     info!("Calibration done. Gyro bias: [{} {} {}]", gyro_bias[0], gyro_bias[1], gyro_bias[2]);
 
-    let mut ekf = EKF::new(Some(init_accel), Some(gyro_bias));
+    let mut ekf = EKF::new(Some(init_accel));
     let mut pid = PID::new();
 
     let mut loop_count = 0;
     let mut last_update = Instant::now();
 
-    let mut stop = false;
+    let stop = false;
     let mut channel_n = 0;
     // Stored PWM pulse widths in µs; initialized to neutral (1500µs) except thrust (1000µs).
     // Layout: [0]=Yaw, [1]=Pitch, [2]=Thrust, [3]=Roll, [4]=Var1, [5]=Var2
@@ -63,7 +65,7 @@ pub async fn control_loop(
 
     loop {
 
-        if loop_count % 100 == 0 {
+        if loop_count % 10 == 0 {
             led.toggle();
         }
 
@@ -71,9 +73,11 @@ pub async fn control_loop(
         let dt = start_time - last_update;
         let dt_secs = dt.as_micros() as f32 / 1000000.0;
 
+        // let mpu_data = imu_filter.update(read_mpu(mpu).await);
         let mpu_data = read_mpu(mpu).await;
+        // info!("Mpu data: {:?}", Debug2Format(&mpu_data));
 
-        // Get gyro data
+        // Get gyro data (negate x to match drone roll convention)
         let gyro_data = [-mpu_data.gyro[0], mpu_data.gyro[1], -mpu_data.gyro[2]];
         // info!("Gyro data: {:?}", gyro_data);
 
@@ -93,14 +97,12 @@ pub async fn control_loop(
         let attitude_q = UnitQuaternion::from_quaternion(Quaternion::new(state[0], state[1], state[2], state[3]));
         let (roll, pitch, yaw) = attitude_q.euler_angles();
         let to_deg = 180.0 / core::f32::consts::PI;
-        
-        if loop_count % 100 == 0 {
-            info!(
-                "roll={} pitch={} yaw={} | bias=[{} {} {}]",
-                roll * to_deg, pitch * to_deg, yaw * to_deg,
-                state[4], state[5], state[6]
-            );
-        }
+            
+        // info!(
+        //     "roll={} pitch={} yaw={} | bias=[{} {} {}]",
+        //     roll * to_deg, pitch * to_deg, yaw * to_deg,
+        //     state[4], state[5], state[6]
+        // );
 
         let attitude = UnitQuaternion::from_quaternion(Quaternion::new(state[0], state[1], state[2], state[3]));
         // Bias-corrected body angular rate (rad/s)
@@ -109,39 +111,49 @@ pub async fn control_loop(
         // Map PWM pulse widths to desired attitude angles.
         // Channels are centred at 1500µs; ±500µs maps to ±MAX_TILT_RAD.
         let norm = |us: u64| (us as f32 - 1500.0) / 500.0; // [-1, 1]
-        let desired_roll  =  norm(channels_us[3]) * MAX_TILT_RAD; // CH4
-        let desired_pitch =  norm(channels_us[1]) * MAX_TILT_RAD; // CH2
-        let desired_yaw   =  norm(channels_us[0]) * core::f32::consts::PI; // CH1 full rotation
+        let desired_roll  = norm(channels_us[3]) * MAX_TILT_RAD; // CH4
+        let desired_pitch = -norm(channels_us[1]) * MAX_TILT_RAD; // CH2
+        let desired_yaw   = norm(channels_us[0]) * core::f32::consts::PI; // CH1 full rotation
         // info!("Desired roll: {}", desired_roll);
 
-        let desired_attitude = UnitQuaternion::from_euler_angles(desired_roll, desired_pitch, desired_yaw);
+        // The EKF converges with body-z pointing down (180° about x from identity),
+        // so shift the neutral setpoint to match by pre-multiplying with that same flip.
+        let base_down = UnitQuaternion::from_quaternion(Quaternion::new(0.0, 1.0, 0.0, 0.0));
+        let desired_attitude = base_down * UnitQuaternion::from_euler_angles(desired_roll, desired_pitch, desired_yaw);
 
         // Map thrust channel (CH3) from [1000, 2000]µs to [0.0, MAX_THROTTLE].
         let throttle = ((channels_us[2] as f32 - 1000.0) / 1000.0).clamp(0.0, 1.0) * MAX_THROTTLE;
 
-        if state[4].abs() > 2. || state[5].abs() > 2. {
-            stop = true;
+        let warmed_up = loop_count >= EKF_WARMUP_CYCLES;
+        if !warmed_up && loop_count == 0 {
+            info!("EKF warming up ({} cycles)...", EKF_WARMUP_CYCLES);
+        } else if loop_count == EKF_WARMUP_CYCLES {
+            info!("EKF warm-up done. Enabling control.");
         }
 
-        let power_motors = match stop {
-            false => pid.control(attitude, omega, desired_attitude, throttle),
-            true => Vector4::new(0.0,0.0,0.0,0.0),
+        // During warmup or stop, hold minimum throttle (1000 µs = 0.0) so ESCs
+        // stay armed but don't spin up.  After warmup, let PID take over.
+        let idle = Vector4::new(0.0, 0.0, 0.0, 0.0);
+        let power_motors = if stop {
+            idle
+        } else if !warmed_up {
+            // Keep motors at the same idle level as initialize_motors used (0.25)
+            // to avoid the power dip that causes the apparent stop-and-restart.
+            Vector4::new(0.1, 0.1, 0.1, 0.1)
+        } else {
+            pid.control(attitude, omega, desired_attitude, throttle)
         };
-        // let power_motors = Vector4::new(0.3,0.0,0.0,0.0);
 
-        // if loop_count % 100 == 0 {
-        //     info!("Power motors: {:?}", Debug2Format(&power_motors));
-        // }
+        if loop_count % 10 == 0 {
+            info!("Power motors: {:?}", Debug2Format(&power_motors));
+        }
 
         set_power(motors, power_motors).await;
 
-        // info!("Elapsed time end: {} us", start_time.elapsed().as_micros());
-        if loop_count % 10 == 0 {
-            channels_us[channel_n] = pwm_receiver_channel(channels[channel_n], channel_n).await;
-            channel_n = (channel_n + 1) % 6;
-        }
+        channels_us[channel_n] = pwm_receiver_channel(channels[channel_n]).await;
+        channel_n = (channel_n + 1) % 6;
 
-        // Timer::at(start_time + Duration::from_millis(CYCLE_TIME_MS)).await;
+        Timer::at(start_time + Duration::from_millis(CYCLE_TIME_MS)).await;
         loop_count += 1;
 
     }

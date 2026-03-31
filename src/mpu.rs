@@ -5,6 +5,7 @@ use embassy_time::{Duration, Timer};
 use mpu6050::*;
 use nalgebra::Vector3;
 
+#[derive(Debug)]
 pub struct MpuData {
     pub acc: Vector3<f32>,
     pub gyro: Vector3<f32>,
@@ -26,6 +27,15 @@ pub async fn initialize_mpu(i2c: I2c<'static, Async, Master>) -> Mpu6050<I2c<'st
         Ok(_) => info!("MPU6050 initialized successfully!"),
         Err(_) => error!("Failed to initialize MPU6050!"),
     }
+
+    // Set low pass filter to 44Hz.
+    _ = mpu.write_bits(
+        0x1A,   // CONFIG register address
+        2,      // start_bit (bits [2:0], so start at bit 2)
+        3,      // length (3 bits)
+        0x03,   // DLPF_CFG value
+    ).map_err(|e| error!("Error writing bits: {}", Debug2Format(&e)));
+
     mpu
 }
 
